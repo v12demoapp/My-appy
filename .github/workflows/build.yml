@@ -1,0 +1,304 @@
+name: Build APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Android project files banao
+        run: |
+          mkdir -p app/src/main/java/com/dosti/chat
+
+          cat > settings.gradle <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "DostiChat"
+          include ':app'
+          EOF
+
+          cat > build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application' version '8.5.2' apply false
+          }
+          EOF
+
+          cat > gradle.properties <<'EOF'
+          android.useAndroidX=false
+          org.gradle.jvmargs=-Xmx2g
+          EOF
+
+          cat > app/build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application'
+          }
+          android {
+              namespace 'com.dosti.chat'
+              compileSdk 34
+              defaultConfig {
+                  applicationId 'com.dosti.chat'
+                  minSdk 24
+                  targetSdk 34
+                  versionCode 1
+                  versionName '1.0'
+              }
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+          }
+          EOF
+
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.RECORD_AUDIO" />
+              <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+              <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
+              <application
+                  android:label="Dosti Chat"
+                  android:icon="@android:drawable/sym_action_chat"
+                  android:usesCleartextTraffic="true"
+                  android:theme="@android:style/Theme.Material.Light.NoActionBar">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:configChanges="orientation|screenSize|keyboardHidden"
+                      android:windowSoftInputMode="adjustResize">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+
+          cat > app/src/main/java/com/dosti/chat/MainActivity.java <<'EOF'
+          package com.dosti.chat;
+
+          import android.Manifest;
+          import android.app.Activity;
+          import android.app.AlertDialog;
+          import android.app.DownloadManager;
+          import android.content.Context;
+          import android.content.Intent;
+          import android.content.SharedPreferences;
+          import android.content.pm.PackageManager;
+          import android.net.Uri;
+          import android.os.Bundle;
+          import android.os.Environment;
+          import android.text.InputType;
+          import android.webkit.JavascriptInterface;
+          import android.webkit.PermissionRequest;
+          import android.webkit.URLUtil;
+          import android.webkit.ValueCallback;
+          import android.webkit.WebChromeClient;
+          import android.webkit.WebResourceError;
+          import android.webkit.WebResourceRequest;
+          import android.webkit.WebResourceResponse;
+          import android.webkit.WebSettings;
+          import android.webkit.WebView;
+          import android.webkit.WebViewClient;
+          import android.widget.EditText;
+
+          public class MainActivity extends Activity {
+              private WebView web;
+              private SharedPreferences prefs;
+              private ValueCallback<Uri[]> fileCb;
+              private PermissionRequest pendingPerm;
+              private boolean dlg = false;
+
+              class Bridge {
+                  @JavascriptInterface
+                  public void changeServer() {
+                      runOnUiThread(() -> askServer("Naya server link daalo"));
+                  }
+              }
+
+              @Override
+              protected void onCreate(Bundle b) {
+                  super.onCreate(b);
+                  prefs = getSharedPreferences("dosti", MODE_PRIVATE);
+                  web = new WebView(this);
+                  setContentView(web);
+
+                  WebSettings s = web.getSettings();
+                  s.setJavaScriptEnabled(true);
+                  s.setDomStorageEnabled(true);
+                  s.setMediaPlaybackRequiresUserGesture(false);
+                  web.addJavascriptInterface(new Bridge(), "Android");
+
+                  web.setWebViewClient(new WebViewClient() {
+                      @Override
+                      public boolean shouldOverrideUrlLoading(WebView v, WebResourceRequest r) {
+                          Uri u = r.getUrl();
+                          Uri base = Uri.parse(prefs.getString("url", ""));
+                          if (u.getHost() != null && u.getHost().equals(base.getHost())) return false;
+                          startActivity(new Intent(Intent.ACTION_VIEW, u));
+                          return true;
+                      }
+
+                      @Override
+                      public void onReceivedError(WebView v, WebResourceRequest r, WebResourceError e) {
+                          if (r.isForMainFrame()) {
+                              askServer("Server se connect nahi hua. Link check karo ya naya daalo.");
+                          }
+                      }
+
+                      @Override
+                      public void onReceivedHttpError(WebView v, WebResourceRequest r, WebResourceResponse e) {
+                          if (r.isForMainFrame() && e.getStatusCode() >= 500) {
+                              askServer("Server abhi band hai ya link badal gaya. Naya link daalo.");
+                          }
+                      }
+                  });
+
+                  web.setWebChromeClient(new WebChromeClient() {
+                      @Override
+                      public void onPermissionRequest(final PermissionRequest req) {
+                          runOnUiThread(() -> {
+                              if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+                                  req.grant(req.getResources());
+                              } else {
+                                  pendingPerm = req;
+                                  requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, 1);
+                              }
+                          });
+                      }
+
+                      @Override
+                      public boolean onShowFileChooser(WebView w, ValueCallback<Uri[]> cb, FileChooserParams p) {
+                          if (fileCb != null) fileCb.onReceiveValue(null);
+                          fileCb = cb;
+                          try {
+                              startActivityForResult(p.createIntent(), 7);
+                          } catch (Exception e) {
+                              fileCb = null;
+                              return false;
+                          }
+                          return true;
+                      }
+                  });
+
+                  web.setDownloadListener((url, ua, cd, mime, len) -> {
+                      try {
+                          DownloadManager.Request q = new DownloadManager.Request(Uri.parse(url));
+                          q.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
+                          q.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS,
+                                  URLUtil.guessFileName(url, cd, mime));
+                          ((DownloadManager) getSystemService(Context.DOWNLOAD_SERVICE)).enqueue(q);
+                      } catch (Exception e) {
+                          startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
+                      }
+                  });
+
+                  String saved = prefs.getString("url", "");
+                  if (saved.isEmpty()) {
+                      askServer("Apne server ka link daalo (jaise https://xxxx.trycloudflare.com)");
+                  } else {
+                      web.loadUrl(saved);
+                  }
+              }
+
+              private void askServer(String msg) {
+                  if (dlg) return;
+                  dlg = true;
+                  final EditText et = new EditText(this);
+                  et.setHint("https://....trycloudflare.com");
+                  et.setSingleLine(true);
+                  et.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
+                  et.setText(prefs.getString("url", ""));
+                  new AlertDialog.Builder(this)
+                          .setTitle("Server link")
+                          .setMessage(msg)
+                          .setView(et)
+                          .setPositiveButton("Save", (d, w) -> {
+                              String u = et.getText().toString().trim();
+                              if (u.isEmpty()) return;
+                              if (!u.startsWith("http")) u = "https://" + u;
+                              while (u.endsWith("/")) u = u.substring(0, u.length() - 1);
+                              prefs.edit().putString("url", u).apply();
+                              web.loadUrl(u);
+                          })
+                          .setNegativeButton("Cancel", null)
+                          .setOnDismissListener(d -> dlg = false)
+                          .show();
+              }
+
+              @Override
+              public void onRequestPermissionsResult(int code, String[] perms, int[] res) {
+                  super.onRequestPermissionsResult(code, perms, res);
+                  if (pendingPerm != null) {
+                      if (res.length > 0 && res[0] == PackageManager.PERMISSION_GRANTED) {
+                          pendingPerm.grant(pendingPerm.getResources());
+                      } else {
+                          pendingPerm.deny();
+                      }
+                      pendingPerm = null;
+                  }
+              }
+
+              @Override
+              protected void onActivityResult(int req, int res, Intent data) {
+                  super.onActivityResult(req, res, data);
+                  if (req == 7 && fileCb != null) {
+                      fileCb.onReceiveValue(WebChromeClient.FileChooserParams.parseResult(res, data));
+                      fileCb = null;
+                  }
+              }
+
+              @Override
+              public void onBackPressed() {
+                  if (web.canGoBack()) {
+                      web.goBack();
+                      return;
+                  }
+                  web.evaluateJavascript(
+                      "(function(){var a=document.querySelector('.screen.active');"
+                      + "if(a&&a.id!=='list'&&a.id!=='login'){"
+                      + "show(a.id==='people'?pplBack:(a.id==='ginfo'?'chat':'list'));return 1}return 0})()",
+                      v -> { if (!"1".equals(v)) finish(); });
+              }
+          }
+          EOF
+
+      - name: APK build karo
+        run: gradle assembleDebug --no-daemon
+
+      - name: Release banao (download link ke liye)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp app/build/outputs/apk/debug/app-debug.apk DostiChat.apk
+          gh release create "v${{ github.run_number }}" DostiChat.apk --title "Dosti Chat v${{ github.run_number }}" --notes "Android APK"
+          
